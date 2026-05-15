@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-// Parse cookie from JSON array or plain string
+// ─── Cookie Parser ───────────────────────────────────────────────
 function parseCookie(raw) {
     const str = raw ? raw.replace(/^'|'$/g, '') : '';
     if (str.trim().startsWith('[')) {
@@ -12,110 +12,106 @@ function parseCookie(raw) {
     return str;
 }
 
-// Escape text for MarkdownV2
+// ─── MarkdownV2 Escape ──────────────────────────────────────────
 function escMd(str) {
     return String(str || '').replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 }
 
-// Extract Pinterest images with page offset for pagination
-async function fetchPinterestImages(query, page = 0) {
-    try {
-        const cookie = parseCookie(process.env.PINTEREST_COOKIE);
-        const url = `https://in.pinterest.com/search/pins/?q=${encodeURIComponent(query)}&page=${page}`;
+// ─── Pinterest Internal Search API (bookmark-based infinite pagination) ───
+async function pinterestSearch(query, bookmark = null) {
+    const cookie = parseCookie(process.env.PINTEREST_COOKIE);
+    const csrfMatch = cookie.match(/csrftoken=([^;]+)/);
+    const csrfToken = csrfMatch ? csrfMatch[1] : '';
 
-        const { data } = await axios.get(url, {
+    const payload = {
+        source_url: `/search/pins/?q=${query}`,
+        data: JSON.stringify({
+            options: {
+                query,
+                scope: 'pins',
+                bookmarks: bookmark ? [bookmark] : [],
+                rs: 'typed',
+                field_set_key: 'unauth',
+                no_fetch_context_on_resource: false
+            },
+            context: {}
+        })
+    };
+
+    const { data } = await axios.post(
+        'https://in.pinterest.com/resource/BaseSearchResource/get/',
+        new URLSearchParams(payload).toString(),
+        {
             headers: {
+                'Cookie': cookie,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cookie': cookie
+                'X-CSRFToken': csrfToken,
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-Pinterest-AppState': 'active',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json',
+                'Origin': 'https://in.pinterest.com',
+                'Referer': `https://in.pinterest.com/search/pins/?q=${encodeURIComponent(query)}`
             }
-        });
+        }
+    );
+
+    const results = data?.resource_response?.data?.results || [];
+    const nextBookmark = data?.resource?.options?.bookmarks?.[0]
+        || data?.resource_response?.bookmark
+        || data?.resource_response?.data?.bookmark
+        || null;
+
+    return { results, bookmark: nextBookmark };
+}
+
+// ─── Extract 5 high-res images from a page of Pinterest results ──
+async function fetchPinterestImages(query, bookmark = null) {
+    try {
+        const { results, bookmark: nextBookmark } = await pinterestSearch(query, bookmark);
 
         const extractedImages = [];
+        for (const pin of results) {
+            if (extractedImages.length >= 5) break;
+            if (!pin?.images) continue;
 
-        // Attempt 1: Parse __PWS_DATA__ JSON blob
-        const pwsMatch = data.match(/<script id="__PWS_DATA__" type="application\/json">({.*?})<\/script>/);
-        if (pwsMatch) {
-            try {
-                const pwsData = JSON.parse(pwsMatch[1]);
-                findImages(pwsData, extractedImages, query);
-            } catch (e) {
-                console.error("Failed to parse __PWS_DATA__");
-            }
-        }
+            // Always try orig first, fallback to 736x
+            let imgUrl = pin.images.orig?.url || pin.images['736x']?.url;
+            if (!imgUrl) continue;
 
-        // Attempt 2: HTML scraping fallback
-        if (extractedImages.length === 0) {
-            let matches = [...data.matchAll(/<img[^>]*alt="([^"]*)"[^>]*src="(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)"/gi)];
-            if (matches.length === 0) {
-                matches = [...data.matchAll(/<img[^>]*src="(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)"[^>]*alt="([^"]*)"/gi)]
-                    .map(m => [m[0], m[2], m[1]]);
-            }
-            if (matches.length === 0) {
-                matches = [...data.matchAll(/(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)/g)]
-                    .map(m => [m[0], query, m[1]]);
-            }
+            // Filter out non-image pins (some results are ads/modules)
+            if (!imgUrl.includes('pinimg.com')) continue;
 
-            // Deduplicate
-            const seen = new Set();
-            const unique = matches.filter(m => {
-                const u = m[2] || m[1];
-                if (seen.has(u)) return false;
-                seen.add(u);
-                return true;
-            });
-
-            // Offset by page so each page returns different images
-            const skip = page * 5;
-            const finalSlice = unique.slice(skip, skip + 5).length > 0
-                ? unique.slice(skip, skip + 5)
-                : unique.slice(0, 5);
-
-            for (const m of finalSlice) {
-                const rawUrl = m[2] || m[1];
-                let altText = (m[1] || query).replace(/This (?:contains an image of|may contain):?\s*/i, '').trim();
-                if (altText.length > 50) altText = altText.substring(0, 50);
-
-                const origUrl = rawUrl.replace(/\/(?:orig|736x|564x|474x|236x)\//, '/orig/');
-                const hdUrl = rawUrl.replace(/\/(?:orig|736x|564x|474x|236x)\//, '/736x/');
-
+            // Verify orig exists, fallback to 736x
+            if (imgUrl.includes('/originals/') || imgUrl.includes('/orig/')) {
                 try {
-                    await axios.head(origUrl, { timeout: 2500 });
-                    extractedImages.push({ url: origUrl, title: altText });
+                    await axios.head(imgUrl, { timeout: 2500 });
                 } catch {
-                    extractedImages.push({ url: hdUrl, title: altText });
+                    imgUrl = pin.images['736x']?.url || imgUrl;
                 }
-
-                if (extractedImages.length >= 5) break;
             }
+
+            const title = String(pin.title || pin.grid_title || pin.description || query)
+                .replace(/\n/g, ' ').trim().substring(0, 50) || query;
+
+            extractedImages.push({ url: imgUrl, title });
         }
 
-        return extractedImages.slice(0, 5);
+        return { images: extractedImages, bookmark: nextBookmark };
     } catch (error) {
         console.error("Pinterest fetch error:", error.message);
-        return [];
+        return { images: [], bookmark: null };
     }
 }
 
-// Deep search for Pinterest image objects inside JSON
-function findImages(obj, results, query) {
-    if (results.length >= 5 || !obj || typeof obj !== 'object') return;
-    if (obj.images && (obj.images.orig || obj.images['736x'])) {
-        const imgUrl = obj.images.orig?.url || obj.images['736x']?.url;
-        if (imgUrl && !results.find(r => r.url === imgUrl)) {
-            results.push({
-                url: imgUrl,
-                title: String(obj.title || obj.grid_title || obj.description || query).substring(0, 50)
-            });
-        }
-    }
-    for (const key in obj) {
-        if (results.length >= 5) break;
-        if (typeof obj[key] === 'object') findImages(obj[key], results, query);
-    }
+// ─── In-memory bookmark store (per chat, per query) ──────────────
+const bookmarkStore = new Map();
+
+function getBookmarkKey(chatId, query) {
+    return `${chatId}:${query.toLowerCase().trim()}`;
 }
 
+// ─── Main Vercel Handler ─────────────────────────────────────────
 export default async function handler(req, res) {
     if (req.method !== 'GET' && req.method !== 'POST') {
         return res.status(405).json({ error: "Method not allowed" });
@@ -129,7 +125,7 @@ export default async function handler(req, res) {
             const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, payload);
             return response.data;
         } catch (e) {
-            console.error(`Telegram API error (${method}):`, e?.response?.data || e.message);
+            console.error(`TG API error (${method}):`, e?.response?.data || e.message);
             return null;
         }
     };
@@ -163,63 +159,17 @@ export default async function handler(req, res) {
                         parse_mode: 'MarkdownV2',
                         reply_markup: {
                             inline_keyboard: [[
-                                { text: '📖 Help', callback_data: 'show_help' },
-                                { text: '👑 Owner', callback_data: 'show_owner' }
+                                { text: '📖 Help', callback_data: 'cmd_help' },
+                                { text: '👑 Owner', callback_data: 'cmd_owner' }
                             ]]
                         }
                     });
 
                 } else if (text.startsWith('/help')) {
-                    await tgApi('sendPhoto', {
-                        chat_id: chatId,
-                        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
-                        caption: [
-                            `📋 *𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦 & 𝗙𝗘𝗔𝗧𝗨𝗥𝗘𝗦*`,
-                            ``,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            `🚀 /start — Launch the bot`,
-                            `📋 /help — Show this menu`,
-                            `👑 /owner — Developer info`,
-                            `🔍 /pic <query> — Search Pinterest`,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            ``,
-                            `*How to use:*`,
-                            `» Type /pic sasuke to get 5 HD images`,
-                            `» Click buttons for next batch of photos`,
-                            `» Every click loads 5 fresh unique images`,
-                            ``,
-                            `_Supports 4K · 8K · Original resolution_`,
-                        ].join('\n'),
-                        parse_mode: 'MarkdownV2',
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '🔍 Try: /pic naruto', callback_data: 'p:0:naruto' }
-                            ]]
-                        }
-                    });
+                    await sendHelp(chatId, tgApi);
 
                 } else if (text.startsWith('/owner')) {
-                    await tgApi('sendPhoto', {
-                        chat_id: chatId,
-                        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
-                        caption: [
-                            `👑 *𝗕𝗢𝗧 𝗢𝗪𝗡𝗘𝗥*`,
-                            ``,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            `🧑‍💻 *Developer:* @letmesolo\\_her`,
-                            `🤖 *Bot:* Pinterest Photo Extractor`,
-                            `⚙️ *Stack:* Node\\.js · Vercel · Telegram`,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            ``,
-                            `_For issues or suggestions, DM the owner\\._`,
-                        ].join('\n'),
-                        parse_mode: 'MarkdownV2',
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '💬 Contact Owner', url: 'https://t.me/letmesolo_her' }
-                            ]]
-                        }
-                    });
+                    await sendOwner(chatId, tgApi);
 
                 } else if (text.startsWith('/pic')) {
                     const query = text.replace(/^\/pic(@\w+)?/i, '').trim();
@@ -231,7 +181,9 @@ export default async function handler(req, res) {
                         });
                         return res.status(200).send('OK');
                     }
-                    await handlePicRequest(query, chatId, tgApi, 0);
+                    // Reset bookmark for new search
+                    bookmarkStore.delete(getBookmarkKey(chatId, query));
+                    await handlePicRequest(query, chatId, tgApi);
                 }
 
             } else if (req.body.callback_query) {
@@ -239,93 +191,119 @@ export default async function handler(req, res) {
                 const chatId = cb.message.chat.id;
                 const cbData = cb.data;
 
-                if (cbData.startsWith('p:')) {
-                    const firstColon = cbData.indexOf(':', 2);
-                    const page = parseInt(cbData.substring(2, firstColon)) || 0;
-                    const query = cbData.substring(firstColon + 1);
-                    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `🔄 Loading batch ${page + 1} for: ${query}` });
-                    await handlePicRequest(query, chatId, tgApi, page);
+                if (cbData.startsWith('next:')) {
+                    const query = cbData.substring(5);
+                    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `🔄 Loading next batch...` });
+                    await handlePicRequest(query, chatId, tgApi);
 
-                } else if (cbData === 'show_help') {
+                } else if (cbData === 'cmd_help') {
                     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-                    await tgApi('sendPhoto', {
-                        chat_id: chatId,
-                        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
-                        caption: [
-                            `📋 *𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦 & 𝗙𝗘𝗔𝗧𝗨𝗥𝗘𝗦*`,
-                            ``,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            `🚀 /start — Launch the bot`,
-                            `📋 /help — Show this menu`,
-                            `👑 /owner — Developer info`,
-                            `🔍 /pic <query> — Search Pinterest`,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            ``,
-                            `*How to use:*`,
-                            `» Type /pic sasuke to get 5 HD images`,
-                            `» Click buttons for next batch of photos`,
-                            `» Every click loads 5 fresh unique images`,
-                            ``,
-                            `_Supports 4K · 8K · Original resolution_`,
-                        ].join('\n'),
-                        parse_mode: 'MarkdownV2',
-                        reply_markup: { inline_keyboard: [[{ text: '🔍 Try: /pic naruto', callback_data: 'p:0:naruto' }]] }
-                    });
+                    await sendHelp(chatId, tgApi);
 
-                } else if (cbData === 'show_owner') {
+                } else if (cbData === 'cmd_owner') {
                     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-                    await tgApi('sendPhoto', {
-                        chat_id: chatId,
-                        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
-                        caption: [
-                            `👑 *𝗕𝗢𝗧 𝗢𝗪𝗡𝗘𝗥*`,
-                            ``,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            `🧑‍💻 *Developer:* @letmesolo\\_her`,
-                            `🤖 *Bot:* Pinterest Photo Extractor`,
-                            `⚙️ *Stack:* Node\\.js · Vercel · Telegram`,
-                            `━━━━━━━━━━━━━━━━━━━━`,
-                            ``,
-                            `_For issues or suggestions, DM the owner\\._`,
-                        ].join('\n'),
-                        parse_mode: 'MarkdownV2',
-                        reply_markup: { inline_keyboard: [[{ text: '💬 Contact Owner', url: 'https://t.me/letmesolo_her' }]] }
-                    });
+                    await sendOwner(chatId, tgApi);
                 }
             }
+
             return res.status(200).send('OK');
         } catch (error) {
-            console.error("Webhook handler error:", error);
+            console.error("Webhook error:", error);
             return res.status(200).send('OK');
         }
     }
 
-    // Direct REST API
+    // ─── Direct REST API ─────────────────────────────────
     const query = req.query.query || req.body?.query;
-    const chatId = req.query.chat_id || req.body?.chat_id;
-    const page = parseInt(req.query.page || '0');
+    const bookmark = req.query.bookmark || req.body?.bookmark || null;
 
     if (!query) return res.status(400).json({ error: "Missing 'query' parameter" });
 
     try {
-        const images = await fetchPinterestImages(query, page);
-        if (chatId && BOT_TOKEN) await handlePicRequest(query, chatId, tgApi, page, images);
-        return res.status(200).json({ success: true, page, images: images.map(img => img.url) });
+        const { images, bookmark: nextBookmark } = await fetchPinterestImages(query, bookmark);
+        return res.status(200).json({
+            success: true,
+            images: images.map(img => img.url),
+            next_bookmark: nextBookmark
+        });
     } catch (error) {
         return res.status(500).json({ error: error.message });
     }
 }
 
-async function handlePicRequest(query, chatId, tgApi, page = 0, preFetchedImages = null) {
+// ─── Send Help Card ──────────────────────────────────────────────
+async function sendHelp(chatId, tgApi) {
+    await tgApi('sendPhoto', {
+        chat_id: chatId,
+        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
+        caption: [
+            `📋 *𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦 & 𝗙𝗘𝗔𝗧𝗨𝗥𝗘𝗦*`,
+            ``,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            `🚀 /start — Launch the bot`,
+            `📋 /help — Show this menu`,
+            `👑 /owner — Developer info`,
+            `🔍 /pic \\<query\\> — Search Pinterest`,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            ``,
+            `*How to use:*`,
+            `» Type /pic sasuke to get 5 HD images`,
+            `» Click ▶️ *Next Batch* for more photos`,
+            `» Every click loads 5 *brand new* images`,
+            ``,
+            `_Supports 4K · 8K · Original resolution_`,
+        ].join('\n'),
+        parse_mode: 'MarkdownV2',
+        reply_markup: {
+            inline_keyboard: [[{ text: '🔍 Try: /pic naruto', callback_data: 'next:naruto' }]]
+        }
+    });
+}
+
+// ─── Send Owner Card ─────────────────────────────────────────────
+async function sendOwner(chatId, tgApi) {
+    await tgApi('sendPhoto', {
+        chat_id: chatId,
+        photo: 'https://tse3.mm.bing.net/th/id/OIP.MrpIRpG6eLtJNPOLdO_IvQHaEK?r=0&rs=1&pid=ImgDetMain&o=7&rm=3',
+        caption: [
+            `👑 *𝗕𝗢𝗧 𝗢𝗪𝗡𝗘𝗥*`,
+            ``,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            `🧑‍💻 *Developer:* @letmesolo\\_her`,
+            `🤖 *Bot:* Pinterest Photo Extractor`,
+            `⚙️ *Stack:* Node\\.js · Vercel · Telegram`,
+            `━━━━━━━━━━━━━━━━━━━━`,
+            ``,
+            `_For issues or suggestions, DM the owner\\._`,
+        ].join('\n'),
+        parse_mode: 'MarkdownV2',
+        reply_markup: {
+            inline_keyboard: [[{ text: '💬 Contact Owner', url: 'https://t.me/letmesolo_her' }]]
+        }
+    });
+}
+
+// ─── Handle /pic Request ─────────────────────────────────────────
+async function handlePicRequest(query, chatId, tgApi) {
+    const bKey = getBookmarkKey(chatId, query);
+    const currentBookmark = bookmarkStore.get(bKey) || null;
+    const batchNum = (bookmarkStore.get(bKey + ':count') || 0) + 1;
+
     const processingMsg = await tgApi('sendMessage', {
         chat_id: chatId,
-        text: page === 0
-            ? `🔍 Searching Pinterest for *${query}*\\.\\.\\.`
-            : `🔄 Loading batch *${page + 1}*\\.\\.\\.`,
+        text: batchNum === 1
+            ? `🔍 Searching Pinterest for *${escMd(query)}*\\.\\.\\.`
+            : `🔄 Loading batch *${batchNum}*\\.\\.\\.`,
         parse_mode: 'MarkdownV2'
     });
 
-    const images = preFetchedImages || await fetchPinterestImages(query, page);
+    const { images, bookmark: nextBookmark } = await fetchPinterestImages(query, currentBookmark);
+
+    // Store the next bookmark for this chat+query
+    if (nextBookmark) {
+        bookmarkStore.set(bKey, nextBookmark);
+        bookmarkStore.set(bKey + ':count', batchNum);
+    }
 
     if (processingMsg?.result) {
         await tgApi('deleteMessage', { chat_id: chatId, message_id: processingMsg.result.message_id });
@@ -340,36 +318,30 @@ async function handlePicRequest(query, chatId, tgApi, page = 0, preFetchedImages
         return;
     }
 
-    // Send album with caption on first photo only
+    // Send album
     const mediaGroup = images.map((img, idx) => ({
         type: 'photo',
         media: img.url,
         ...(idx === 0 ? {
-            caption: `📌 *${escMd(query)}* — Batch ${page + 1}\n🖼 ${images.length} high\\-res photos`,
+            caption: `📌 *${escMd(query)}* — Batch ${batchNum}\n🖼 ${images.length} high\\-res photos`,
             parse_mode: 'MarkdownV2'
         } : {})
     }));
 
     await tgApi('sendMediaGroup', { chat_id: chatId, media: mediaGroup });
 
-    // Build inline buttons — next page loads fresh images
-    const nextPage = page + 1;
-    const maxQueryLen = 64 - `p:${nextPage}:`.length;
+    // Build "Next Batch" button — keeps the same query, bookmark auto-advances
+    const maxQueryLen = 64 - 5; // "next:" prefix
     const safeQuery = query.length > maxQueryLen ? query.substring(0, maxQueryLen) : query;
-
-    const emojis = ['🌸', '🔥', '✨', '💫', '🎯'];
-    const allButtons = images.map((_, index) => ({
-        text: `${emojis[index]} Photo ${index + 1}`,
-        callback_data: `p:${nextPage}:${safeQuery}`
-    }));
-
-    // 3 buttons on row 1, remaining on row 2
-    const rows = [allButtons.slice(0, 3), allButtons.slice(3)].filter(r => r.length > 0);
 
     await tgApi('sendMessage', {
         chat_id: chatId,
-        text: `━━━━━━━━━━━━━━━━━━━━\n🖼 *${images.length} photos* delivered — Batch ${page + 1}\n📌 _Tap any button to load next batch_\n━━━━━━━━━━━━━━━━━━━━`,
+        text: `━━━━━━━━━━━━━━━━━━━━\n🖼 *${images.length} photos* — Batch ${batchNum}\n📌 _Tap below for the next 5 unique images_\n━━━━━━━━━━━━━━━━━━━━`,
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: rows }
+        reply_markup: {
+            inline_keyboard: [[
+                { text: `▶️ Next Batch (${batchNum + 1})`, callback_data: `next:${safeQuery}` }
+            ]]
+        }
     });
 }
