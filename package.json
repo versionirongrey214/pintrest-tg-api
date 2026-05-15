@@ -1,0 +1,17 @@
+{
+  "name": "pinterest-api",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node local-dev.js"
+  },
+  "dependencies": {
+    "@bochilteam/scraper": "^5.0.1",
+    "@myno_21/pinterest-scraper": "^1.0.4",
+    "api-dylux": "^1.8.6",
+    "axios": "^1.7.2",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ruhend-scraper": "^10.0.3"
+  }
+}

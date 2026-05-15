@@ -1,0 +1,11 @@
+node_modules/
+.env
+*.html
+*.json
+!package.json
+!vercel.json
+test-*.js
+download-sample.js
+check-images.js
+inspect-json.js
+make-cookie.js
