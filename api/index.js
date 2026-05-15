@@ -74,14 +74,37 @@ async function fetchPinterestImages(query) {
         }
         
 
-        // Fallback: if JSON parse failed or found 0 images, scrape HTML for raw image URLs
+        // Fallback: if JSON parse failed or found 0 images, scrape HTML for raw image URLs and alt texts
         if (extractedImages.length === 0) {
-            const rawUrls = [...data.matchAll(/https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg/g)].map(m => m[0]);
-            const uniqueUrls = [...new Set(rawUrls)];
+            let matches = [...data.matchAll(/<img[^>]*alt="([^"]*)"[^>]*src="(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)"/gi)];
+            if (matches.length === 0) {
+                matches = [...data.matchAll(/<img[^>]*src="(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)"[^>]*alt="([^"]*)"/gi)].map(m => [m[0], m[2], m[1]]);
+            }
+            
+            // If no alt tags matched, just grab URLs
+            if (matches.length === 0) {
+                matches = [...data.matchAll(/(https:\/\/i\.pinimg\.com\/(?:orig|736x|564x|474x|236x)\/[^\s"'\\]+\.jpg)/g)].map(m => [m[0], query, m[1]]);
+            }
+            
+            // Deduplicate based on URL
+            const uniqueMatches = [];
+            const seenUrls = new Set();
+            for (let m of matches) {
+                if (!seenUrls.has(m[2])) {
+                    seenUrls.add(m[2]);
+                    uniqueMatches.push(m);
+                }
+            }
             
             // Check availability to prevent S3 403 Access Denied on missing orig files
-            const checkAndPush = async (imgUrl) => {
+            const checkAndPush = async (match) => {
                 if (extractedImages.length >= 5) return;
+                
+                let altText = match[1] || query;
+                altText = altText.replace(/This (?:contains an image of|may contain):?\s*/i, '').trim();
+                if (altText.length > 50) altText = altText.substring(0, 50); // Keep it short enough for telegram callback
+                
+                const imgUrl = match[2];
                 const origRes = imgUrl.replace(/\/\d+x\//, '/orig/');
                 const highResFallback = imgUrl.replace(/\/\d+x\//, '/736x/');
                 
@@ -89,17 +112,17 @@ async function fetchPinterestImages(query) {
                     // Fast HEAD request to check if /orig/ actually exists
                     await axios.head(origRes, { timeout: 2000 });
                     if (!extractedImages.find(e => e.url === origRes)) {
-                        extractedImages.push({ url: origRes, title: query });
+                        extractedImages.push({ url: origRes, title: altText });
                     }
                 } catch (e) {
                     // Fallback to 736x if orig doesn't exist
                     if (!extractedImages.find(e => e.url === highResFallback)) {
-                        extractedImages.push({ url: highResFallback, title: query });
+                        extractedImages.push({ url: highResFallback, title: altText });
                     }
                 }
             };
 
-            const promises = uniqueUrls.slice(0, 10).map(img => checkAndPush(img));
+            const promises = uniqueMatches.slice(0, 10).map(m => checkAndPush(m));
             await Promise.all(promises);
         }
         
