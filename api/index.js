@@ -196,6 +196,14 @@ export default async function handler(req, res) {
                     await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `🔄 Loading next batch...` });
                     await handlePicRequest(query, chatId, tgApi);
 
+                } else if (cbData.startsWith('pic:')) {
+                    // Photo-specific search: uses that photo's title as a new query
+                    const newQuery = cbData.substring(4);
+                    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: `🔍 Finding similar images...` });
+                    // Reset bookmark for this new query
+                    bookmarkStore.delete(getBookmarkKey(chatId, newQuery));
+                    await handlePicRequest(newQuery, chatId, tgApi);
+
                 } else if (cbData === 'cmd_help') {
                     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
                     await sendHelp(chatId, tgApi);
@@ -330,18 +338,34 @@ async function handlePicRequest(query, chatId, tgApi) {
 
     await tgApi('sendMediaGroup', { chat_id: chatId, media: mediaGroup });
 
-    // Build "Next Batch" button — keeps the same query, bookmark auto-advances
+    // Build per-photo "Similar" buttons + "Next Batch" button
+    const emojis = ['🌸', '🔥', '✨', '💫', '🎯'];
+    const photoButtons = images.map((img, index) => {
+        // Use the image title as query for similar search, keep under 64 bytes
+        let photoQuery = img.title || query;
+        const maxLen = 64 - 4; // "pic:" prefix
+        if (photoQuery.length > maxLen) photoQuery = photoQuery.substring(0, maxLen);
+        return {
+            text: `${emojis[index]} Photo ${index + 1}`,
+            callback_data: `pic:${photoQuery}`
+        };
+    });
+
+    // Next batch button
     const maxQueryLen = 64 - 5; // "next:" prefix
     const safeQuery = query.length > maxQueryLen ? query.substring(0, maxQueryLen) : query;
 
+    // Row 1: Photos 1-3 | Row 2: Photos 4-5 | Row 3: Next Batch
+    const rows = [
+        photoButtons.slice(0, 3),
+        photoButtons.slice(3),
+        [{ text: `▶️ Next Batch (${batchNum + 1})`, callback_data: `next:${safeQuery}` }]
+    ].filter(r => r.length > 0);
+
     await tgApi('sendMessage', {
         chat_id: chatId,
-        text: `━━━━━━━━━━━━━━━━━━━━\n🖼 *${images.length} photos* — Batch ${batchNum}\n📌 _Tap below for the next 5 unique images_\n━━━━━━━━━━━━━━━━━━━━`,
+        text: `━━━━━━━━━━━━━━━━━━━━\n🖼 *${images.length} photos* — Batch ${batchNum}\n📌 _Tap a photo for similar, or load next batch_\n━━━━━━━━━━━━━━━━━━━━`,
         parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[
-                { text: `▶️ Next Batch (${batchNum + 1})`, callback_data: `next:${safeQuery}` }
-            ]]
-        }
+        reply_markup: { inline_keyboard: rows }
     });
 }
