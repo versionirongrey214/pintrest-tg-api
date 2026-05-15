@@ -3,7 +3,20 @@ import axios from 'axios';
 // Extract Pinterest images
 async function fetchPinterestImages(query) {
     try {
-        const cookie = process.env.PINTEREST_COOKIE ? process.env.PINTEREST_COOKIE.replace(/^'|'$/g, '') : '';
+        let cookie = process.env.PINTEREST_COOKIE ? process.env.PINTEREST_COOKIE.replace(/^'|'$/g, '') : '';
+        
+        // Auto-detect and parse if the user pasted raw JSON instead of a cookie string
+        if (cookie.trim().startsWith('[')) {
+            try {
+                const parsedCookie = JSON.parse(cookie);
+                if (Array.isArray(parsedCookie)) {
+                    cookie = parsedCookie.map(c => `${c.name}=${c.value}`).join('; ');
+                }
+            } catch (e) {
+                console.error("Failed to parse JSON cookie from env.");
+            }
+        }
+        
         const url = `https://in.pinterest.com/search/pins/?q=${encodeURIComponent(query)}`;
         const { data } = await axios.get(url, {
             headers: {
