@@ -1,5 +1,5 @@
 name = "pintrest-tg-api"
-main = "src/index.js" # Double-check if your file is here, e.g., "index.js" or "bot.js"
+main = "api/index.js"  # Pointing to your actual folder
 compatibility_date = "2026-05-16"
 compatibility_flags = [ "nodejs_compat" ]
 
