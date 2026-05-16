@@ -19,7 +19,9 @@ function escMd(str) {
 
 // ─── Pinterest Internal Search API (bookmark-based infinite pagination) ───
 async function pinterestSearch(query, bookmark = null) {
-    const cookie = parseCookie(process.env.PINTEREST_COOKIE);
+    const rawCookie = process.env.PINTEREST_COOKIE || 
+                      ((process.env.PINTEREST_COOKIE_PART1 || '') + (process.env.PINTEREST_COOKIE_PART2 || ''));
+    const cookie = parseCookie(rawCookie);
     const csrfMatch = cookie.match(/csrftoken=([^;]+)/);
     const csrfToken = csrfMatch ? csrfMatch[1] : '';
 
