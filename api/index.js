@@ -132,7 +132,8 @@ export default async function handler(req, res) {
         }
     };
 
-    const isTelegramWebhook = req.body && (req.body.message || req.body.callback_query);
+    // Improved webhook detection: check for update_id or any standard TG fields
+    const isTelegramWebhook = req.body && (req.body.update_id || req.body.message || req.body.callback_query || req.body.inline_query);
 
     if (isTelegramWebhook) {
         try {
@@ -223,11 +224,19 @@ export default async function handler(req, res) {
         }
     }
 
-    // ─── Direct REST API ─────────────────────────────────
+    // ─── Direct REST API / Health Check ─────────────────
     const query = req.query.query || req.body?.query;
     const bookmark = req.query.bookmark || req.body?.bookmark || null;
 
-    if (!query) return res.status(400).json({ error: "Missing 'query' parameter" });
+    if (!query) {
+        return res.status(200).json({ 
+            success: true, 
+            status: "Bot is alive 🚀",
+            platform: typeof process !== 'undefined' && process.env.CF_PAGES ? "Cloudflare" : "Vercel/Node",
+            webhook_configured: !!BOT_TOKEN,
+            instructions: "Send a Telegram message to this bot or use ?query=search_term"
+        });
+    }
 
     try {
         const { images, bookmark: nextBookmark } = await fetchPinterestImages(query, bookmark);
