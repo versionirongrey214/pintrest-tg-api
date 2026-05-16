@@ -1,7 +1,8 @@
 name = "pintrest-tg-api"
-main = "api/index.js"  # Pointing to your actual folder
+main = "api/worker.js"
 compatibility_date = "2026-05-16"
 compatibility_flags = [ "nodejs_compat" ]
 
 [vars]
 # Keep BOT_TOKEN and PINTEREST_COOKIE hidden in your Cloudflare Dashboard settings!
+# Or set them via 'wrangler secret put'
