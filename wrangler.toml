@@ -1,0 +1,8 @@
+name = "pintrest-tg-api"
+main = "src/index.js" # Make sure this points to your main script file!
+compatibility_date = "2026-05-16"
+node_compat = true
+
+[vars]
+# Add non-sensitive variables here if needed
+# Keep BOT_TOKEN and PINTEREST_COOKIE in the Cloudflare dashboard settings!
